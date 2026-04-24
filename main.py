@@ -1,0 +1,158 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+from datetime import datetime
+import plotly.graph_objects as go
+
+@st.cache_data
+def generate_test_data():
+    np.random.seed(42)
+    
+    # PLATFORM DATA
+    platform_data = []
+    for i in range(100):
+        platform_data.append({
+            'tx_id': f'tx_{1000+i:04d}',
+            'amount': round(np.random.uniform(10, 500), 2),
+            'created_date': f'2024-01-{np.random.randint(1,32):02d}',
+            'customer_id': f'cust_{np.random.randint(1,50):02d}'
+        })
+    
+    # GAP 1: Next month settlement  
+    platform_data += [{
+        'tx_id': 'tx_9999', 'amount': 100.00,
+        'created_date': '2024-01-30', 'customer_id': 'cust_01'
+    }]
+    
+    # GAP 2: Rounding setup
+    platform_data += [{
+        'tx_id': 'tx_8888', 'amount': 100.00,
+        'created_date': '2024-01-15', 'customer_id': 'cust_02'
+    }]
+    
+    # GAP 3: Duplicate setup  
+    platform_data += [{
+        'tx_id': 'tx_7777', 'amount': 250.00,
+        'created_date': '2024-01-20', 'customer_id': 'cust_03'
+    }]
+    
+    platform_df = pd.DataFrame(platform_data)
+    
+    # ADD DUPLICATE tx_7777
+    dup_row = platform_df[platform_df.tx_id == 'tx_7777'].iloc[0:1]
+    platform_df = pd.concat([platform_df, dup_row], ignore_index=True)
+    
+    # BANK DATA
+    bank_data = []
+    for i in range(100):
+        bank_data.append({
+            'tx_id': f'tx_{1000+i:04d}',
+            'settled_amount': round(np.random.uniform(10, 500), 2),
+            'settled_date': f'2024-01-{np.random.randint(3,32):02d}',
+            'customer_id': f'cust_{np.random.randint(1,50):02d}'
+        })
+    
+    # GAP 1: Settles in Feb (not matched)
+    bank_data += [{
+        'tx_id': 'tx_9999', 'settled_amount': 100.00,
+        'settled_date': '2024-02-01', 'customer_id': 'cust_01'
+    }]
+    
+    # GAP 2: Rounding error
+    bank_data += [{
+        'tx_id': 'tx_8888', 'settled_amount': 99.999,
+        'settled_date': '2024-01-16', 'customer_id': 'cust_02'
+    }]
+    
+    # GAP 4: Orphan refund
+    bank_data += [{
+        'tx_id': 'refund_tx_6666', 'settled_amount': -50.00,
+        'settled_date': '2024-01-15', 'customer_id': 'cust_99'
+    }]
+    
+    return platform_df, pd.DataFrame(bank_data)
+
+def reconcile_data(platform_df, bank_df):
+    platform_month = platform_df[pd.to_datetime(platform_df.created_date) <= '2024-01-31'].copy()
+    bank_month = bank_df[pd.to_datetime(bank_df.settled_date) <= '2024-01-31'].copy()
+    
+    matches = pd.merge(platform_month, bank_month, on='tx_id', how='inner', suffixes=('_plat', '_bank'))
+    matches['amount_diff'] = abs(matches['amount'] - matches['settled_amount'])
+    
+    perfect = matches[matches.amount_diff <= 0.001]
+    rounding_issues = matches[(matches.amount_diff > 0.001) & (matches.amount_diff <= 0.01)]
+    
+    unmatched_platform = platform_month[~platform_month.tx_id.isin(bank_month.tx_id)]
+    unmatched_bank = bank_month[~bank_month.tx_id.isin(platform_month.tx_id)]
+    
+    platform_dups = platform_month[platform_month.duplicated(subset=['tx_id'], keep=False)]
+    
+    return {
+        'platform_total': platform_month.amount.sum(),
+        'bank_total': bank_month.settled_amount.sum(),
+        'variance': platform_month.amount.sum() - bank_month.settled_amount.sum(),
+        'perfect_matches': len(perfect),
+        'rounding_issues': rounding_issues,
+        'unmatched_platform': unmatched_platform,
+        'unmatched_bank': unmatched_bank,
+        'platform_duplicates': platform_dups
+    }
+
+def main():
+    st.set_page_config(page_title="Payment Reconciliation", layout="wide")
+    st.title("🧾 Payment Reconciliation - 4 Gaps Demo")
+    
+    platform_df, bank_df = generate_test_data()
+    results = reconcile_data(platform_df, bank_df)
+    
+    # SUMMARY
+    col1, col2, col3 = st.columns(3)
+    col1.metric("💳 Platform Total", f"${results['platform_total']:,.2f}")
+    col2.metric("🏦 Bank Total", f"${results['bank_total']:,.2f}")
+    col3.metric("⚠️ Variance", f"${results['variance']:,.2f}")
+    
+    # GAP FINDER
+    st.subheader("🚨 4 GAPS DETECTED")
+    
+    r1c1, r1c2 = st.columns(2)
+    with r1c1:
+        # Gap 1
+        next_month = results['unmatched_platform']
+        if len(next_month) > 0 and 'tx_9999' in next_month.tx_id.values:
+            st.error("**GAP 1: Next Month Settlement** 🕒\ntx_9999 ($100)")
+    
+    with r1c2:
+        # Gap 2  
+        if len(results['rounding_issues']) > 0:
+            issue = results['rounding_issues'].iloc[0]
+            st.warning(f"**GAP 2: Rounding Error** ⚖️\ntx_8888\nPlatform: ${issue.amount:.2f}\nBank: ${issue.settled_amount:.3f}")
+    
+    r2c1, r2c2 = st.columns(2)
+    with r2c1:
+        # Gap 3
+        if len(results['platform_duplicates']) > 0:
+            st.error("**GAP 3: Platform Duplicate** 🔄\ntx_7777 (x2 entries)")
+    
+    with r2c2:
+        # Gap 4
+        refunds = results['unmatched_bank'][results['unmatched_bank'].settled_amount < 0]
+        if len(refunds) > 0:
+            refund = refunds.iloc[0]
+            st.error(f"**GAP 4: Orphan Refund** ↩️\n{refund.tx_id}\n(${refund.settled_amount:.2f})")
+    
+    # DATA TABLES
+    st.subheader("📋 Raw Data")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.dataframe(results['unmatched_platform'].head())
+    with col2:
+        st.dataframe(results['unmatched_bank'].head())
+    
+    # DOWNLOAD
+    csv1 = platform_df.to_csv(index=False).encode()
+    csv2 = bank_df.to_csv(index=False).encode()
+    st.download_button("📥 Platform CSV", csv1, "platform.csv")
+    st.download_button("📥 Bank CSV", csv2, "bank.csv")
+
+if __name__ == "__main__":
+    main()

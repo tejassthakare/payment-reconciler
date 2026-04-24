@@ -1,0 +1,38 @@
+import pandas as pd
+import numpy as np
+from main import generate_test_data, reconcile_data
+
+def test_all_four_gaps():
+    platform_df, bank_df = generate_test_data()
+    results = reconcile_data(platform_df, bank_df)
+    
+    print("=== SUMMARY ===")
+    print(f"Platform: ${results['platform_total']:,.2f}")
+    print(f"Bank:     ${results['bank_total']:,.2f}")
+    print(f"Variance: ${results['variance']:,.2f}")
+    
+    # Gap 1: Next month settlement
+    next_month = results['unmatched_platform']
+    gap1 = 'tx_9999' in next_month.tx_id.values if len(next_month)>0 else False
+    print(f"✅ GAP 1 (Next Month): {'PASS' if gap1 else 'FAIL'}")
+    
+    # Gap 2: Rounding
+    rounding = results['rounding_issues']
+    gap2 = len(rounding) > 0 and '8888' in str(rounding.tx_id.values)
+    print(f"✅ GAP 2 (Rounding): {'PASS' if gap2 else 'FAIL'}")
+    
+    # Gap 3: Duplicate
+    dups = results['platform_duplicates']
+    gap3 = len(dups) == 2 and 'tx_7777' in str(dups.tx_id.values)
+    print(f"✅ GAP 3 (Duplicate): {'PASS' if gap3 else 'FAIL'}")
+    
+    # Gap 4: Refund
+    orphans = results['unmatched_bank']
+    gap4 = any('refund' in str(tx) for tx in orphans.tx_id) and any(amt<0 for amt in orphans.settled_amount)
+    print(f"✅ GAP 4 (Refund): {'PASS' if gap4 else 'FAIL'}")
+    
+    assert all([gap1, gap2, gap3, gap4]), "NOT ALL GAPS DETECTED!"
+    print("\n🎉 ALL 4 GAPS DETECTED CORRECTLY!")
+
+if __name__ == "__main__":
+    test_all_four_gaps()
